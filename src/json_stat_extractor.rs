@@ -175,7 +175,16 @@ pub fn extract_stat_from_json_iter(json_value_stream: IntoIter<Value>) -> JsonSt
                         attributes: attr_stats,
                     });
                 }
-                _ => panic!(),
+                Value::Bool(val) => ValStat(JsonValStat {
+                    size: val.to_string().len(),
+                    max_size: val.to_string().len(),
+                    min_size: val.to_string().len(),
+                }),
+                Value::Number(val) => ValStat(JsonValStat {
+                    size: val.to_string().len(),
+                    max_size: val.to_string().len(),
+                    min_size: val.to_string().len(),
+                }),
             };
             return v_size;
         })
