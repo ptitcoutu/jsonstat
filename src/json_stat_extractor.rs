@@ -1,3 +1,4 @@
+use itertools::Itertools;
 use std::fmt::Error;
 use std::io::Read;
 use std::result::IntoIter;
@@ -166,6 +167,39 @@ pub fn extract_stat_from_json_iter(json_value_stream: IntoIter<Value>) -> JsonSt
                             };
                             return attrs;
                         })
+                        .into_group_map_by(|json_attr_stat| (json_attr_stat.name.clone()))
+                        .into_iter()
+                        .map(|attr_stat_by_name| {
+                            let attr_name = attr_stat_by_name.0;
+                            let attr_stats = attr_stat_by_name.1;
+                            let attr_sizes_and_counts: Vec<Vec<usize>> = attr_stats
+                                .iter()
+                                .map(|stat| {
+                                    vec![stat.size, stat.count, stat.min_size, stat.max_size]
+                                })
+                                .collect();
+                            let attr_sizes =
+                                attr_sizes_and_counts.clone().into_iter().map(|it| it[0]);
+                            let attr_counts =
+                                attr_sizes_and_counts.clone().into_iter().map(|it| it[1]);
+                            let attr_count = attr_counts.sum();
+                            let attr_total_sizes: usize = attr_sizes.sum();
+                            let attr_avg_size = attr_total_sizes
+                                / attr_sizes_and_counts.clone().into_iter().count();
+                            let attr_min_sizes =
+                                attr_sizes_and_counts.clone().into_iter().map(|it| it[2]);
+                            let attr_min_size = attr_min_sizes.min().unwrap_or(0);
+                            let attr_max_sizes =
+                                attr_sizes_and_counts.clone().into_iter().map(|it| it[3]);
+                            let attr_max_size = attr_max_sizes.max().unwrap_or(0);
+                            return JsonAttrStat {
+                                name: attr_name,
+                                size: attr_avg_size,
+                                count: attr_count,
+                                max_size: attr_max_size,
+                                min_size: attr_min_size,
+                            };
+                        })
                         .collect();
                     return ArrayStat(JsonArrayStat {
                         size: total_size,
@@ -250,6 +284,27 @@ mod tests {
     }
 
     #[test]
+    fn it_should_provide_size_of_json_true() {
+        let result_value: Result<Value, Error> = Ok(json!(true));
+        let json_iter: IntoIter<Value> = result_value.into_iter();
+        let result = extract_stat_from_json_iter(json_iter);
+        match result {
+            ValStat(JsonValStat {
+                size,
+                max_size,
+                min_size,
+            }) => {
+                assert_eq!(size, 4);
+                assert_eq!(max_size, 4);
+                assert_eq!(min_size, 4);
+            }
+            _ => {
+                assert!(false);
+            }
+        }
+    }
+
+    #[test]
     fn it_should_provide_size_of_json_object() {
         let result_value: Result<Value, Error> = Ok(json!({"test":"test"}));
         let json_iter: IntoIter<Value> = result_value.into_iter();
@@ -298,6 +353,40 @@ mod tests {
                 assert_eq!(size, 25);
                 assert_eq!(count, 2);
                 assert_eq!(attributes.len(), 0);
+            }
+            _ => {
+                assert!(false);
+            }
+        }
+    }
+
+    #[test]
+    fn it_should_provide_size_of_json_array_of_objects() {
+        let result_value: Result<Value, Error> =
+            Ok(json!([{"test":"test"}, {"test":"test3", "b": true}]));
+        let json_iter: IntoIter<Value> = result_value.into_iter();
+        let result = extract_stat_from_json_iter(json_iter);
+        match result {
+            ArrayStat(JsonArrayStat {
+                size,
+                count,
+                max_size,
+                min_size,
+                attributes,
+            }) => {
+                assert_eq!(min_size, 15);
+                assert_eq!(max_size, 24);
+                assert_eq!(size, 42);
+                assert_eq!(count, 2);
+                assert_eq!(attributes.len(), 2);
+                let test_attribute = attributes.get(1).unwrap();
+                assert_eq!(test_attribute.name, "test");
+                assert_eq!(test_attribute.min_size, 6);
+                assert_eq!(test_attribute.max_size, 7);
+                assert_eq!(test_attribute.size, 6);
+                assert_eq!(test_attribute.count, 2);
+                let b_attribute = attributes.get(0).unwrap();
+                assert_eq!(b_attribute.name, "b");
             }
             _ => {
                 assert!(false);
