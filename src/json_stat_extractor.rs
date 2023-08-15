@@ -40,7 +40,6 @@ impl Clone for JsonStat {
                 attributes: val.attributes.clone(),
                 ..*val
             }),
-            _ => panic!("cannot clone jsonstat"),
         };
     }
 }
