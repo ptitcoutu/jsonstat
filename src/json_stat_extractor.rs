@@ -1,12 +1,13 @@
-use itertools::Itertools;
 use std::fmt::Error;
 use std::io::Read;
 use std::result::IntoIter;
 
-use crate::json_stat_extractor::JsonStat::{ArrayStat, ObjStat, ValStat};
+use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use serde_json::Value::{Array, Object, String};
 use serde_json::{from_reader, Value};
+
+use crate::json_stat_extractor::JsonStat::{ArrayStat, ObjStat, ValStat};
 
 const DOUBLE_QUOTES_SIZE: usize = 2;
 const CURLY_BRACKETS_SIZE: usize = 2;
@@ -27,6 +28,23 @@ pub enum JsonStat {
     ArrayStat(JsonArrayStat),
 }
 
+impl Clone for JsonStat {
+    fn clone(&self) -> Self {
+        return match &self {
+            ValStat(val) => ValStat(JsonValStat { ..*val }),
+            ObjStat(val) => ObjStat(JsonObjStat {
+                attributes: val.attributes.clone(),
+                ..*val
+            }),
+            ArrayStat(val) => ArrayStat(JsonArrayStat {
+                attributes: val.attributes.clone(),
+                ..*val
+            }),
+            _ => panic!("cannot clone jsonstat"),
+        };
+    }
+}
+
 pub fn json_stat_size(json_stat: &JsonStat) -> usize {
     return match json_stat {
         ValStat(vs) => vs.size,
@@ -42,6 +60,20 @@ pub struct JsonAttrStat {
     count: usize,
     max_size: usize,
     min_size: usize,
+    values: Vec<JsonStat>,
+}
+
+impl Clone for JsonAttrStat {
+    fn clone(&self) -> Self {
+        JsonAttrStat {
+            name: self.name.clone(),
+            size: self.size,
+            count: self.count,
+            max_size: self.max_size,
+            min_size: self.min_size,
+            values: self.values.clone(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -97,6 +129,7 @@ pub fn extract_stat_from_json_iter(json_value_stream: IntoIter<Value>) -> JsonSt
                                 count: 1,
                                 max_size: val_size,
                                 min_size: val_size,
+                                values: vec![val_stat],
                             };
                         })
                         .collect();
@@ -178,14 +211,25 @@ pub fn extract_stat_from_json_iter(json_value_stream: IntoIter<Value>) -> JsonSt
                                     vec![stat.size, stat.count, stat.min_size, stat.max_size]
                                 })
                                 .collect();
+                            let attr_values: Vec<JsonStat> = attr_stats
+                                .iter()
+                                .map(|stat| -> Vec<JsonStat> {
+                                    stat.values
+                                        .iter()
+                                        .map(|item: &JsonStat| -> JsonStat { item.clone() })
+                                        .collect()
+                                })
+                                .flatten()
+                                .map(|item| item.clone())
+                                .collect();
                             let attr_sizes =
                                 attr_sizes_and_counts.clone().into_iter().map(|it| it[0]);
                             let attr_counts =
                                 attr_sizes_and_counts.clone().into_iter().map(|it| it[1]);
                             let attr_count = attr_counts.sum();
                             let attr_total_sizes: usize = attr_sizes.sum();
-                            let attr_avg_size = attr_total_sizes
-                                / attr_sizes_and_counts.clone().into_iter().count();
+                            let attr_avg_size =
+                                attr_total_sizes / attr_sizes_and_counts.clone().len();
                             let attr_min_sizes =
                                 attr_sizes_and_counts.clone().into_iter().map(|it| it[2]);
                             let attr_min_size = attr_min_sizes.min().unwrap_or(0);
@@ -198,6 +242,7 @@ pub fn extract_stat_from_json_iter(json_value_stream: IntoIter<Value>) -> JsonSt
                                 count: attr_count,
                                 max_size: attr_max_size,
                                 min_size: attr_min_size,
+                                values: attr_values,
                             };
                         })
                         .collect();
@@ -232,6 +277,7 @@ mod tests {
     use std::fmt::Error;
     use std::result::IntoIter;
 
+    use assert_json_diff::assert_json_include;
     use serde_json::{json, Value};
 
     use JsonStat::ValStat;
@@ -361,7 +407,7 @@ mod tests {
     }
 
     #[test]
-    fn it_should_provide_size_of_json_array_of_objects() {
+    fn it_should_provide_size_of_json_array_of_objects_1() {
         let result_value: Result<Value, Error> =
             Ok(json!([{"test":"test"}, {"test":"test3", "b": true}]));
         let json_iter: IntoIter<Value> = result_value.into_iter();
@@ -379,18 +425,205 @@ mod tests {
                 assert_eq!(size, 42);
                 assert_eq!(count, 2);
                 assert_eq!(attributes.len(), 2);
-                let test_attribute = attributes.get(1).unwrap();
+                let first_attribute = attributes.get(0).unwrap();
+                let test_is_first_attribute = first_attribute.name == "test";
+                let test_attribute = if test_is_first_attribute {
+                    first_attribute
+                } else {
+                    attributes.get(1).unwrap()
+                };
                 assert_eq!(test_attribute.name, "test");
                 assert_eq!(test_attribute.min_size, 6);
                 assert_eq!(test_attribute.max_size, 7);
                 assert_eq!(test_attribute.size, 6);
                 assert_eq!(test_attribute.count, 2);
-                let b_attribute = attributes.get(0).unwrap();
+                let b_attribute = if test_is_first_attribute {
+                    attributes.get(1).unwrap()
+                } else {
+                    first_attribute
+                };
                 assert_eq!(b_attribute.name, "b");
             }
             _ => {
                 assert!(false);
             }
         }
+    }
+
+    #[test]
+    fn it_should_provide_size_of_json_array_of_objects_2() {
+        let result_value: Result<Value, Error> =
+            Ok(json!([{"test":"test"}, {"test":"test2"},{"test":"test3"}]));
+        let json_iter: IntoIter<Value> = result_value.into_iter();
+        let result = extract_stat_from_json_iter(json_iter);
+        match result {
+            ArrayStat(JsonArrayStat {
+                size,
+                count,
+                max_size,
+                min_size,
+                attributes,
+            }) => {
+                assert_eq!(min_size, 15);
+                assert_eq!(max_size, 16);
+                assert_eq!(size, 51);
+                assert_eq!(count, 3);
+                assert_eq!(attributes.len(), 1);
+                let test_attribute = attributes.get(0).unwrap();
+                assert_eq!(test_attribute.name, "test");
+                assert_eq!(test_attribute.min_size, 6);
+                assert_eq!(test_attribute.max_size, 7);
+                assert_eq!(test_attribute.size, 6);
+                assert_eq!(test_attribute.count, 3);
+            }
+            _ => {
+                assert!(false);
+            }
+        }
+    }
+
+    #[test]
+    fn it_should_provide_size_of_json_embedding_objects() {
+        let result_value: Result<Value, Error> = Ok(json!({"a":{"b": "0123456789"}}));
+        let json_iter: IntoIter<Value> = result_value.into_iter();
+        let result = extract_stat_from_json_iter(json_iter);
+        match result {
+            ObjStat(JsonObjStat {
+                size,
+                count,
+                max_size,
+                min_size,
+                attributes,
+            }) => {
+                assert_eq!(min_size, 24);
+                assert_eq!(max_size, 24);
+                assert_eq!(size, 24);
+                assert_eq!(count, 1);
+                assert_eq!(attributes.len(), 1);
+                let test_attribute = attributes.get(0).unwrap();
+                assert_eq!(test_attribute.name, "a");
+                assert_eq!(test_attribute.min_size, 18);
+                assert_eq!(test_attribute.max_size, 18);
+                assert_eq!(test_attribute.size, 18);
+                assert_eq!(test_attribute.count, 1);
+                assert_eq!(test_attribute.values.len(), 1);
+                let test_attribute_a_value = test_attribute.values.get(0).unwrap();
+                match test_attribute_a_value {
+                    ObjStat(JsonObjStat {
+                        size,
+                        count,
+                        max_size,
+                        min_size,
+                        attributes,
+                    }) => {
+                        assert_eq!(*size, 18);
+                        assert_eq!(*count, 1);
+                        assert_eq!(*max_size, 18);
+                        assert_eq!(*min_size, 18);
+                        assert_eq!(attributes.len(), 1);
+                        let attr_stat = attributes.first().unwrap();
+                        assert_eq!(attr_stat.name, "b");
+                        assert_eq!(attr_stat.count, 1);
+                        assert_eq!(attr_stat.size, 12);
+                        assert_eq!(attr_stat.max_size, 12);
+                        assert_eq!(attr_stat.min_size, 12);
+                    }
+                    _ => {
+                        assert!(false);
+                    }
+                }
+            }
+            _ => {
+                assert!(false);
+            }
+        }
+    }
+
+    #[test]
+    fn it_should_provide_size_of_json_embedding_objects_inside_an_array() {
+        let result_value: Result<Value, Error> = Ok(
+            json!([{"a":{"b": "0123456789"}}, {"a":{"b": "0123456789"}}, {"a":{"c": "ABC_0123456789"}}]),
+        );
+        let json_iter: IntoIter<Value> = result_value.into_iter();
+        let result = extract_stat_from_json_iter(json_iter);
+        assert_eq!("", serde_json::to_string_pretty(&result).unwrap());
+        assert_json_include!(
+            actual: json!(result),
+            expected: json!({
+                "ArrayStat": {
+                    "size":80,
+                    "count":3,
+                    "max_size":28,
+                    "min_size":24,
+                    "attributes":[
+                        {
+                            "name":"a",
+                            "size":19,
+                            "count":3,
+                            "max_size":22,
+                            "min_size":18,
+                            "values":[{
+                              "ObjectStat": {
+                                "size":80,
+                                "count":1,
+                                "max_size":28,
+                                "min_size":24,
+                              }
+                            }]
+                        }
+                    ]
+                }
+            })
+        );
+        /*        match result {
+            ArrayStat(JsonArrayStat {
+                size,
+                count,
+                max_size,
+                min_size,
+                attributes,
+            }) => {
+                assert_eq!(min_size, 24);
+                assert_eq!(max_size, 28);
+                assert_eq!(size, 80);
+                assert_eq!(count, 1);
+                assert_eq!(attributes.len(), 1);
+                let test_attribute = attributes.get(0).unwrap();
+                assert_eq!(test_attribute.name, "a");
+                assert_eq!(test_attribute.min_size, 18);
+                assert_eq!(test_attribute.max_size, 18);
+                assert_eq!(test_attribute.size, 18);
+                assert_eq!(test_attribute.count, 1);
+                assert_eq!(test_attribute.values.len(), 1);
+                let test_attribute_a_value = test_attribute.values.get(0).unwrap();
+                match test_attribute_a_value {
+                    ObjStat(JsonObjStat {
+                        size,
+                        count,
+                        max_size,
+                        min_size,
+                        attributes,
+                    }) => {
+                        assert_eq!(*size, 18);
+                        assert_eq!(*count, 1);
+                        assert_eq!(*max_size, 18);
+                        assert_eq!(*min_size, 18);
+                        assert_eq!(attributes.len(), 1);
+                        let attr_stat = attributes.first().unwrap();
+                        assert_eq!(attr_stat.name, "b");
+                        assert_eq!(attr_stat.count, 1);
+                        assert_eq!(attr_stat.size, 12);
+                        assert_eq!(attr_stat.max_size, 12);
+                        assert_eq!(attr_stat.min_size, 12);
+                    }
+                    _ => {
+                        assert!(false);
+                    }
+                }
+            }
+            _ => {
+                assert!(false);
+            }
+        }*/
     }
 }
